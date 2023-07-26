@@ -1,8 +1,9 @@
 import express, { Request, Response } from "express";
 import cors from "cors";
-import { db } from "./database/knex";
+import { BaseDatabase } from "./database/BaseDatabase";
 import { TVideo } from "./types";
 import { Videos } from "./models/Videos";
+import { VideoDatabase } from "./database/VideoDatabase";
 
 const app = express()
 
@@ -33,30 +34,21 @@ app.get("/ping", async (req: Request, res: Response) => {
 
 app.get("/videos", async (req: Request, res: Response) => {
     try{
-        const videos = await db("Videos")
-        let classes = []
-        for (const video of videos){
-            const videoClass = new Videos(
-                video.id,
-                video.title,
-                video.duration,
-                video.uploadDate
-            )
-            classes.push(videoClass)
-        }
+        const q = req.query.q as string
 
-        let result = []
-        for (const video of classes){
-            const videoType: TVideo = {
-                id:video.getId(),
-                title: video.getTitle(),
-                duration: video.getDuration(),
-                upload_date: video.getUpDate()
-            }
-            result.push(videoType)
-        }
+        const videoDatabase = new VideoDatabase()
 
-        res.status(200).send(result)
+        const videosDB = await videoDatabase.findVideos(q)
+
+        const videos: Videos[] = videosDB.map((videoDB) => new Videos(
+            videoDB.id,
+            videoDB.title,
+            videoDB.duration,
+            videoDB.upload_date
+        ))
+
+        res.status(200).send(videos)
+
     }catch (error) {
         console.log(error);
 
@@ -73,17 +65,8 @@ app.get("/videos", async (req: Request, res: Response) => {
 
 app.post("/videos", async (req: Request, res: Response) =>{
     try{
-        const id = req.body.id;
-        const title = req.body.title;
-        const duration = req.body.duration;
-        const upload_date = new Date().toISOString()
+        const {id, title, duration} = req.body
 
-        const [idExist] = await db("videos").where({id})
-
-        if(idExist){
-            res.status(400)
-            throw new Error("ID já registrada.")
-        }
         if(!id || !title || !duration){
             res.status(400)
             throw new Error("Campos obrigatórios.")
@@ -101,19 +84,32 @@ app.post("/videos", async (req: Request, res: Response) =>{
             throw new Error("'Duração' precisa ser um número.")
         }
 
-        const video = new Videos(
-            id, title, duration, upload_date
-        )
+        const videoDatabase = new VideoDatabase()
 
-        const newVideo: TVideo = {
-            id: video.getId(),
-            title: video.getTitle(),
-            duration: video.getDuration(),
-            upload_date: video.getUpDate()
+        const videoDBExists = await videoDatabase.findVideoById(id)
+
+        if (videoDBExists){
+            res.status(400)
+            throw new Error("ID já existe.")
         }
 
-        await db("videos").insert(newVideo)
-        res.status(200).send("Vídeo carreado.")
+        const newVideo = new Videos( 
+            id,
+            title,
+            duration,
+            new Date().toISOString()
+        )
+
+        const newVideoDB: TVideo = {
+            id: newVideo.getId(),
+            title: newVideo.getTitle(),
+            duration: newVideo.getDuration(),
+            upload_date: newVideo.getUpDate()
+        }
+
+        await videoDatabase.insertVideo(newVideoDB)
+
+        res.status(201).send(newVideo)
 
     }catch (error) {
         console.log(error);
@@ -131,37 +127,69 @@ app.post("/videos", async (req: Request, res: Response) =>{
 
 app.put("/videos/:id", async (req: Request, res: Response) => {
     try {
-        const id = req.params.id as string
-        const title = req.body.title as string | undefined
-        const duration = req.body.durations as number| undefined
+        const idExist = req.params.id
+        const {id, title, duration, uploadDate} = req.body
 
-        const [idExist] = await db("videos").where({id})
+        if (id !== undefined){
+            if (typeof id !== "string") {
+                res.status(400)
+                throw new Error("ID deve ser uma string.")
+            }
+        }
 
-        if(!idExist) {
+        if (title !== undefined) {
+            if (typeof title !== "string") {
+                res.status(400)
+                throw new Error("Título deve ser uma string.")
+            }
+        }
+
+        if (duration !== undefined) {
+            if (typeof duration !== "number") {
+                res.status(400)
+                throw new Error("Duração deve ser um número.")
+            }
+        }
+        
+        if (uploadDate !== undefined) {
+            if (typeof uploadDate !== "string") {
+                res.status(400)
+                throw new Error("Data de upload deve ser uma string.")
+            }
+        }
+
+        const videoDatabase = new VideoDatabase()
+
+        const videoDB = await videoDatabase.findVideoById(idExist)
+
+        if (!videoDB) {
             res.status(400)
-            throw new Error("ID do vídeo não encontrada.")
+            throw new Error("ID não encontrado.")
         }
 
-        if(idExist){
-            const video = new Videos(idExist.id, idExist.title, idExist.duration, idExist.uploadDate)
-            if(title){
-                video.setTitle(title)
-            }
-            if(duration){
-                video.setDuration(duration)
-            }
+        const video = new Videos(
+            videoDB.id,
+            videoDB.title,
+            videoDB.duration,
+            videoDB.upload_date
+        )
 
-            const editedVideo: TVideo = {
-                id: video.getId(),
-                title: video.getTitle(),
-                duration: video.getDuration(),
-                upload_date: video.getUpDate()
-            }
+        id && video.setId(id)
+        title && video.setTitle(title)
+        duration && video.setDuration(duration)
+        uploadDate && video.setUpDate(uploadDate)
 
-            await db("videos").update(editedVideo).where({id})
-
-            res.status(200).send("Vídeo atualizado.")
+        const updatedVideoDB: TVideo = {
+            id: video.getId(),
+            title: video.getTitle(),
+            duration: video.getDuration(),
+            upload_date: video.getUpDate()
         }
+
+        await videoDatabase.updateVideo(idExist, updatedVideoDB)
+
+        res.status(200).send(video)
+
     }catch (error) {
         console.log(error);
 
@@ -178,20 +206,20 @@ app.put("/videos/:id", async (req: Request, res: Response) => {
 
 app.delete("/videos/:id", async (req: Request, res: Response) =>{
     try{
-        const id = req.params.id as string
+        const id = req.params.id 
 
-        const [idExist] = await db("videos").where({id})
+        const videoDatabase = new VideoDatabase()
 
-        if(!idExist){
-        res.status(400)
-        throw new Error("Vídeo não encontrado.")
+        const videoDB = await videoDatabase.findVideoById(id)
+
+        if (!videoDB){
+            res.status(400)
+            throw new Error("Id não encontrado.")
         }
+        
+        await videoDatabase.deleteVideo(id)
 
-        const video = new Videos(idExist.id, idExist.title, idExist.duration, idExist.uploadDate)
-
-        await db("videos").del().where({id: video.getId()})
-
-        res.status(200).send("Vídeo deletado.")
+        res.status(200).end()
 
     }catch (error) {
         console.log(error);
